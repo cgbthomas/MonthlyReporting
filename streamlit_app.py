@@ -876,7 +876,7 @@ if process:
     # -----------------------------------
     # Guidance
     # -----------------------------------
-    with st.expander("How to use this planner", expanded=False):
+        with st.expander("How to use this planner", expanded=False):
         st.markdown(
             f"""
 1. Enter your baseline sales for **{base_label}** by store.
@@ -893,6 +893,6 @@ if process:
    - Company Rollup
    - Bonus Reference
 
-This mirrors the structure of the quarter planning PDF: store-level scenarios, company totals, profit-center allocation, and bonus thresholds. :contentReference[oaicite:1]{index=1}
+This mirrors the structure of the quarter planning PDF: store-level scenarios, company totals, profit-center allocation, and bonus thresholds.
 """
         )

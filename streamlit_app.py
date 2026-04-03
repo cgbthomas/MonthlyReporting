@@ -87,33 +87,6 @@ def safe_div(a, b):
         return None
     return a / b
 
-def split_big_paste(raw: str) -> list[str]:
-    raw = (raw or "").strip()
-    if not raw:
-        return []
-
-    seps = ["\n-----\n", "\n=====\n", "\n---\n"]
-    for sep in seps:
-        if sep in raw:
-            parts = [p.strip() for p in raw.split(sep) if p.strip()]
-            if parts:
-                return parts
-
-    return [raw]
-
-def build_currency_format_map(columns):
-    out = {}
-    for c in columns:
-        if any(
-            key in c.lower()
-            for key in [
-                "sales", "goal", "variance", "increase", "shipping", "packing",
-                "mailbox", "notary", "print", "total", "base"
-            ]
-        ) and "%" not in c:
-            out[c] = "${:,.2f}"
-    return out
-
 # ============================================================
 # PARSERS
 # ============================================================
@@ -208,7 +181,7 @@ def parse_simple_monthly_sales(text: str) -> pd.DataFrame:
                     "M3": m3,
                     "Quarter Total": m1 + m2 + m3
                 })
-            except:
+            except Exception:
                 pass
         elif len(parts) >= 5 and re.fullmatch(r"\d{3,5}", parts[0]):
             center = parts[0]
@@ -223,7 +196,7 @@ def parse_simple_monthly_sales(text: str) -> pd.DataFrame:
                     "M3": m3,
                     "Quarter Total": m1 + m2 + m3
                 })
-            except:
+            except Exception:
                 pass
 
     return pd.DataFrame(rows)
@@ -248,7 +221,7 @@ def parse_simple_quarter_sales(text: str) -> pd.DataFrame:
                     "Center": parts[0],
                     "Quarter Total": money_to_float(parts[-1])
                 })
-            except:
+            except Exception:
                 pass
 
     return pd.DataFrame(rows)
@@ -256,12 +229,7 @@ def parse_simple_quarter_sales(text: str) -> pd.DataFrame:
 # ============================================================
 # CORE BUILDERS
 # ============================================================
-def build_base_table(input_df: pd.DataFrame, comparison_mode: str) -> pd.DataFrame:
-    """
-    comparison_mode:
-      - 'Quarter Total'
-      - 'Month-by-Month Total'
-    """
+def build_base_table(input_df: pd.DataFrame) -> pd.DataFrame:
     out_rows = []
 
     for center in CENTER_ORDER:
@@ -350,22 +318,10 @@ def build_company_rollup(df: pd.DataFrame, scenarios: list[float]) -> pd.DataFra
         yoy_dollar = curr_total - base_total
         yoy_pct = safe_div(yoy_dollar, base_total)
 
-    rows.append({
-        "Metric": "Base Quarter Total",
-        "Value": base_total,
-    })
-    rows.append({
-        "Metric": "Current Quarter Total",
-        "Value": curr_total,
-    })
-    rows.append({
-        "Metric": "YoY Dollar Variance",
-        "Value": yoy_dollar,
-    })
-    rows.append({
-        "Metric": "YoY % Variance",
-        "Value": yoy_pct,
-    })
+    rows.append({"Metric": "Base Quarter Total", "Value": base_total})
+    rows.append({"Metric": "Current Quarter Total", "Value": curr_total})
+    rows.append({"Metric": "YoY Dollar Variance", "Value": yoy_dollar})
+    rows.append({"Metric": "YoY % Variance", "Value": yoy_pct})
 
     if "Benchmark Quarter Goal" in df.columns:
         bench_total = df["Benchmark Quarter Goal"].sum(min_count=1)
@@ -383,14 +339,14 @@ def build_company_rollup(df: pd.DataFrame, scenarios: list[float]) -> pd.DataFra
 
     return pd.DataFrame(rows)
 
-def build_profit_center_breakdown(df: pd.DataFrame, selected_goal_col: str, alloc: dict[str, float]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def build_profit_center_breakdown(df: pd.DataFrame, alloc: dict[str, float]) -> tuple[pd.DataFrame, pd.DataFrame]:
     q_rows = []
     m_rows = []
 
     for _, r in df.iterrows():
         center = r["Center"]
         store = r["Store"]
-        qgoal = r.get(selected_goal_col)
+        qgoal = r.get("Selected Quarter Goal")
 
         m1 = r.get("Selected M1 Goal")
         m2 = r.get("Selected M2 Goal")
@@ -412,7 +368,6 @@ def build_profit_center_breakdown(df: pd.DataFrame, selected_goal_col: str, allo
             q_entry[pc_name] = qgoal * pct if pd.notna(qgoal) else None
             m_entry[pc_name] = (qgoal / 3.0) * pct if pd.notna(qgoal) else None
 
-        # richer monthly detail in separate fields
         for pc_name, pc_pct in alloc.items():
             pct = pc_pct / 100.0
             m_entry[f"{pc_name} M1"] = m1 * pct if pd.notna(m1) else None
@@ -422,9 +377,7 @@ def build_profit_center_breakdown(df: pd.DataFrame, selected_goal_col: str, allo
         q_rows.append(q_entry)
         m_rows.append(m_entry)
 
-    q_df = pd.DataFrame(q_rows)
-    m_df = pd.DataFrame(m_rows)
-    return q_df, m_df
+    return pd.DataFrame(q_rows), pd.DataFrame(m_rows)
 
 def add_selected_goal_columns(df: pd.DataFrame, selected_goal_type: str) -> pd.DataFrame:
     out = df.copy()
@@ -435,7 +388,6 @@ def add_selected_goal_columns(df: pd.DataFrame, selected_goal_type: str) -> pd.D
         out["Selected M2 Goal"] = out["Benchmark M2 Goal"]
         out["Selected M3 Goal"] = out["Benchmark M3 Goal"]
     else:
-        # selected_goal_type expected like "8.0"
         scen = float(selected_goal_type)
         out["Selected Quarter Goal"] = out[f"Goal {scen:.1f}% Quarter"]
         out["Selected M1 Goal"] = out[f"Goal {scen:.1f}% M1"]
@@ -475,7 +427,7 @@ comparison_input_mode = st.sidebar.radio(
     options=[
         "Monthly Store Tables",
         "Quarter Totals Only",
-        "FRS Quarter Reports (aggregate net sales)",
+        "FRS Quarter Reports (one box per store)",
     ]
 )
 
@@ -500,7 +452,7 @@ scenarios_csv = st.sidebar.text_input("Scenario % Targets", value="4,6,8,10")
 try:
     scenario_values = [float(x.strip()) for x in scenarios_csv.split(",") if x.strip()]
     scenario_values = sorted(set(scenario_values))
-except:
+except Exception:
     scenario_values = DEFAULT_SCENARIOS
 
 benchmark_adjustment_pct = st.sidebar.number_input(
@@ -535,7 +487,7 @@ pc_alloc = {
 
 pc_total = sum(pc_alloc.values())
 if abs(pc_total - 95.0) < 0.0001:
-    st.sidebar.info("Profit center allocation currently totals 95.0%, matching the example mix shown in the PDF.")
+    st.sidebar.info("Profit center allocation currently totals 95.0%.")
 elif abs(pc_total - 100.0) > 0.0001:
     st.sidebar.warning(f"Profit center allocation totals {pc_total:.1f}%.")
 
@@ -577,19 +529,33 @@ elif comparison_input_mode == "Quarter Totals Only":
         )
 
 else:
-    c1, c2 = st.columns(2)
-    with c1:
-        base_frs_text = st.text_area(
-            f"{base_label} FRS Reports",
-            height=260,
-            placeholder="Paste one or more full Worker Sales by Product Category reports separated by -----"
-        )
-    with c2:
-        current_frs_text = st.text_area(
-            f"{current_label} FRS Reports",
-            height=260,
-            placeholder="Paste one or more full Worker Sales by Product Category reports separated by -----"
-        )
+    with st.expander(f"{base_label} FRS Reports", expanded=True):
+        st.markdown("Paste one full Worker Sales by Product Category report into each store box.")
+        base_frs_inputs = {}
+        base_cols = st.columns(2)
+
+        for i, center in enumerate(CENTER_ORDER):
+            with base_cols[i % 2]:
+                base_frs_inputs[center] = st.text_area(
+                    f"{center} - {CENTER_NAMES.get(center, '')}",
+                    height=220,
+                    key=f"base_frs_{center}",
+                    placeholder=f"Paste the full Worker Sales by Product Category report for {center} here..."
+                )
+
+    with st.expander(f"{current_label} FRS Reports", expanded=True):
+        st.markdown("Paste one full Worker Sales by Product Category report into each store box.")
+        current_frs_inputs = {}
+        current_cols = st.columns(2)
+
+        for i, center in enumerate(CENTER_ORDER):
+            with current_cols[i % 2]:
+                current_frs_inputs[center] = st.text_area(
+                    f"{center} - {CENTER_NAMES.get(center, '')}",
+                    height=220,
+                    key=f"current_frs_{center}",
+                    placeholder=f"Paste the full Worker Sales by Product Category report for {center} here..."
+                )
 
 process = st.button("Build Quarter Goal Plan", type="primary", use_container_width=True)
 
@@ -597,9 +563,6 @@ process = st.button("Build Quarter Goal Plan", type="primary", use_container_wid
 # PROCESSING
 # ============================================================
 if process:
-    # -----------------------------------
-    # Build unified input dataframe
-    # -----------------------------------
     base_df = pd.DataFrame({"Center": CENTER_ORDER})
     current_df = pd.DataFrame({"Center": CENTER_ORDER})
 
@@ -670,29 +633,48 @@ if process:
         current_df["Current M3"] = None
 
     else:
-        # FRS quarter reports - aggregate one report per store for each comparison set
-        base_reports = split_big_paste(base_frs_text)
-        current_reports = split_big_paste(current_frs_text)
-
+        # FRS quarter reports - one box per store
         base_rows = []
-        for i, rpt in enumerate(base_reports, start=1):
+        for center in CENTER_ORDER:
+            rpt = (base_frs_inputs.get(center) or "").strip()
+            if not rpt:
+                continue
+
             parsed = parse_frs_worker_sales_report(rpt)
+
             if not parsed.center:
-                diagnostics.append(f"{base_label} FRS report #{i}: center not found.")
+                diagnostics.append(f"{base_label} {center}: center not found in pasted report.")
+            elif parsed.center != center:
+                diagnostics.append(f"{base_label} {center}: pasted report appears to be for center {parsed.center}.")
+
             if parsed.net_sales is None:
-                diagnostics.append(f"{base_label} FRS report #{i} ({parsed.center or 'Unknown'}): totals not found.")
-            if parsed.center:
-                base_rows.append({"Center": parsed.center, "Base Quarter": parsed.net_sales})
+                diagnostics.append(f"{base_label} {center}: totals not found.")
+
+            base_rows.append({
+                "Center": center,
+                "Base Quarter": parsed.net_sales
+            })
 
         current_rows = []
-        for i, rpt in enumerate(current_reports, start=1):
+        for center in CENTER_ORDER:
+            rpt = (current_frs_inputs.get(center) or "").strip()
+            if not rpt:
+                continue
+
             parsed = parse_frs_worker_sales_report(rpt)
+
             if not parsed.center:
-                diagnostics.append(f"{current_label} FRS report #{i}: center not found.")
+                diagnostics.append(f"{current_label} {center}: center not found in pasted report.")
+            elif parsed.center != center:
+                diagnostics.append(f"{current_label} {center}: pasted report appears to be for center {parsed.center}.")
+
             if parsed.net_sales is None:
-                diagnostics.append(f"{current_label} FRS report #{i} ({parsed.center or 'Unknown'}): totals not found.")
-            if parsed.center:
-                current_rows.append({"Center": parsed.center, "Current Quarter": parsed.net_sales})
+                diagnostics.append(f"{current_label} {center}: totals not found.")
+
+            current_rows.append({
+                "Center": center,
+                "Current Quarter": parsed.net_sales
+            })
 
         base_parsed = pd.DataFrame(base_rows)
         current_parsed = pd.DataFrame(current_rows)
@@ -724,20 +706,13 @@ if process:
         st.error("No usable input data was found.")
         st.stop()
 
-    base_table = build_base_table(unified, comparison_input_mode)
+    base_table = build_base_table(unified)
     scenario_table = add_scenario_columns(base_table, scenario_values, target_weights)
     scenario_table = add_benchmark_projection(scenario_table, benchmark_adjustment_pct, target_weights)
     scenario_table = add_selected_goal_columns(scenario_table, selected_goal_type)
     company_rollup = build_company_rollup(scenario_table, scenario_values)
-    quarterly_pc_df, monthly_pc_df = build_profit_center_breakdown(
-        scenario_table,
-        selected_goal_col="Selected Quarter Goal",
-        alloc=pc_alloc
-    )
+    quarterly_pc_df, monthly_pc_df = build_profit_center_breakdown(scenario_table, pc_alloc)
 
-    # -----------------------------------
-    # TABS
-    # -----------------------------------
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Benchmark Builder",
         "Scenario Goals",
@@ -801,11 +776,7 @@ if process:
         st.subheader("Company Rollup")
         st.dataframe(company_rollup, use_container_width=True)
 
-        # Company totals by scenario in a compact grid
         compact_rows = []
-        base_total = company_rollup.loc[company_rollup["Metric"] == "Base Quarter Total", "Value"]
-        base_total = base_total.iloc[0] if not base_total.empty else None
-
         for scen in scenario_values:
             q_metric = f"{scen:.1f}% Scenario Quarter Goal"
             inc_metric = f"{scen:.1f}% Scenario Dollar Increase"
@@ -842,43 +813,34 @@ if process:
         st.markdown("**Center Manager Bonus Reference**")
         st.dataframe(cm_df, use_container_width=True)
 
-    # -----------------------------------
-    # Diagnostics
-    # -----------------------------------
     if diagnostics:
         with st.expander("Diagnostics", expanded=False):
             for msg in diagnostics:
                 st.write(f"- {msg}")
 
-    # -----------------------------------
-    # Export
-    # -----------------------------------
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        scenario_table.to_excel(writer, sheet_name="Scenario Goals", index=False)
-        quarterly_pc_df.to_excel(writer, sheet_name="Quarterly PC Breakdown", index=False)
-        monthly_pc_df.to_excel(writer, sheet_name="Monthly PC Breakdown", index=False)
-        company_rollup.to_excel(writer, sheet_name="Company Rollup", index=False)
+    try:
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            scenario_table.to_excel(writer, sheet_name="Scenario Goals", index=False)
+            quarterly_pc_df.to_excel(writer, sheet_name="Quarterly PC Breakdown", index=False)
+            monthly_pc_df.to_excel(writer, sheet_name="Monthly PC Breakdown", index=False)
+            company_rollup.to_excel(writer, sheet_name="Company Rollup", index=False)
 
-        am_df, gm_df, cm_df = build_bonus_reference_tables()
-        am_df.to_excel(writer, sheet_name="Bonus Area Manager", index=False)
-        gm_df.to_excel(writer, sheet_name="Bonus General Manager", index=False)
-        cm_df.to_excel(writer, sheet_name="Bonus Center Manager", index=False)
+            am_df, gm_df, cm_df = build_bonus_reference_tables()
+            am_df.to_excel(writer, sheet_name="Bonus Area Manager", index=False)
+            gm_df.to_excel(writer, sheet_name="Bonus General Manager", index=False)
+            cm_df.to_excel(writer, sheet_name="Bonus Center Manager", index=False)
 
-    st.download_button(
-        "Download Excel Workbook",
-        data=output.getvalue(),
-        file_name="quarter_goal_planner.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
+        st.download_button(
+            "Download Excel Workbook",
+            data=output.getvalue(),
+            file_name="quarter_goal_planner.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    except ModuleNotFoundError:
+        st.warning("Excel export is unavailable because openpyxl is not installed. Add openpyxl to requirements.txt.")
 
-    # -----------------------------------
-    # Guidance
-    # -----------------------------------
-    # -----------------------------------
-    # Guidance
-    # -----------------------------------
     with st.expander("How to use this planner", expanded=False):
         st.markdown(
             f"""
@@ -895,7 +857,5 @@ if process:
    - Profit Center Breakdown
    - Company Rollup
    - Bonus Reference
-
-This mirrors the structure of the quarter planning PDF: store-level scenarios, company totals, profit-center allocation, and bonus thresholds.
 """
         )

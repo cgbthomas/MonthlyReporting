@@ -12,9 +12,9 @@ import streamlit as st
 st.set_page_config(page_title="Quarter Goal Planner", layout="wide")
 st.title("Quarter Goal Planner")
 st.caption(
-    "Build quarterly and monthly store goals using prior-year baselines, "
+    "Build quarterly store goals using prior-year baselines, "
     "YoY benchmarking, scenario growth targets, company rollups, "
-    "profit-center allocations, and bonus reference tables."
+    "actual FRS profit-center comparisons, goal allocations, and bonus tables."
 )
 
 # ============================================================
@@ -87,6 +87,19 @@ def safe_div(a, b):
         return None
     return a / b
 
+def get_status_icon(actual: Optional[float], goal: Optional[float]) -> str:
+    if actual is None or goal is None or pd.isna(actual) or pd.isna(goal):
+        return ""
+    if actual >= goal:
+        return "🟢"
+    gap_pct = safe_div(goal - actual, goal)
+    if gap_pct is not None and gap_pct <= 0.02:
+        return "🟡"
+    return "🔴"
+
+def get_category_amount(categories: dict[str, float], name: str) -> float:
+    return float(categories.get(name, 0.0) or 0.0)
+
 # ============================================================
 # PARSERS
 # ============================================================
@@ -96,6 +109,7 @@ class ParsedFRS:
     total_sales: Optional[float]
     psp_sales: float
     net_sales: Optional[float]
+    categories: dict[str, float]
     raw_text: str
 
 def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
@@ -105,6 +119,7 @@ def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
     - Totals income
     - Public Service Payments income
     - Net Sales = Totals - PSP
+    - Product category income lines
     """
     text = normalize_text(text)
 
@@ -127,14 +142,17 @@ def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
     if m:
         total_sales = money_to_float(m.group(1))
 
-    psp_sales = 0.0
-    m = re.search(
-        r"^[\+\-]\s*Public Service Payments\s+\d+\s+\d+\s+\$([\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}\s+\$[\d,]+\.\d{2}\s*$",
+    categories = {}
+    category_matches = re.finditer(
+        r"^[\+\-]\s*(.*?)\s+\d+\s+\d+\s+\$([\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}\s+\$[\d,]+\.\d{2}\s*$",
         text,
         flags=re.IGNORECASE | re.MULTILINE,
     )
-    if m:
-        psp_sales = money_to_float(m.group(1))
+    for match in category_matches:
+        cat_name = re.sub(r"\s+", " ", match.group(1)).strip()
+        categories[cat_name] = money_to_float(match.group(2))
+
+    psp_sales = categories.get("Public Service Payments", 0.0)
 
     net_sales = None
     if total_sales is not None:
@@ -145,6 +163,7 @@ def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
         total_sales=total_sales,
         psp_sales=psp_sales,
         net_sales=net_sales,
+        categories=categories,
         raw_text=text,
     )
 
@@ -227,6 +246,63 @@ def parse_simple_quarter_sales(text: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 # ============================================================
+# ACTUAL FRS PROFIT CENTER LOGIC
+# ============================================================
+def extract_actual_profit_centers(categories: dict[str, float]) -> dict[str, float]:
+    """
+    Packing = Retail Shipping Supplies + Packaging Materials +
+              Packaging Service Fee + Office Supplies
+
+    Print = Printing only
+    """
+    ups_shipping = get_category_amount(categories, "Shipping Charges (UPS)")
+    mailbox = get_category_amount(categories, "Mailbox Service")
+    notary = get_category_amount(categories, "Notary")
+
+    packing = (
+        get_category_amount(categories, "Retail Shipping Supplies")
+        + get_category_amount(categories, "Packaging Materials")
+        + get_category_amount(categories, "Packaging Service Fee")
+        + get_category_amount(categories, "Office Supplies")
+    )
+
+    printing = get_category_amount(categories, "Printing")
+
+    return {
+        "UPS Shipping": ups_shipping,
+        "Packing": packing,
+        "Mailbox": mailbox,
+        "Notary": notary,
+        "Print": printing,
+    }
+
+def build_profit_center_comparison(base_pc_map: dict, current_pc_map: dict) -> pd.DataFrame:
+    rows = []
+
+    for center in CENTER_ORDER:
+        store = CENTER_NAMES.get(center, "")
+        base_pcs = base_pc_map.get(center, {})
+        curr_pcs = current_pc_map.get(center, {})
+
+        for pc in ["UPS Shipping", "Packing", "Mailbox", "Notary", "Print"]:
+            base_val = float(base_pcs.get(pc, 0.0) or 0.0)
+            curr_val = float(curr_pcs.get(pc, 0.0) or 0.0)
+            dollar_var = curr_val - base_val
+            pct_var = safe_div(dollar_var, base_val)
+
+            rows.append({
+                "Center": center,
+                "Store": store,
+                "Profit Center": pc,
+                "Base Quarter": base_val,
+                "Current Quarter": curr_val,
+                "Variance $": dollar_var,
+                "Variance %": pct_var,
+            })
+
+    return pd.DataFrame(rows)
+
+# ============================================================
 # CORE BUILDERS
 # ============================================================
 def build_base_table(input_df: pd.DataFrame) -> pd.DataFrame:
@@ -238,13 +314,7 @@ def build_base_table(input_df: pd.DataFrame) -> pd.DataFrame:
             out_rows.append({
                 "Center": center,
                 "Store": CENTER_NAMES.get(center, ""),
-                "Base M1": None,
-                "Base M2": None,
-                "Base M3": None,
                 "Base Quarter": None,
-                "Current M1": None,
-                "Current M2": None,
-                "Current M3": None,
                 "Current Quarter": None,
                 "YoY $ Variance": None,
                 "YoY % Variance": None,
@@ -264,13 +334,7 @@ def build_base_table(input_df: pd.DataFrame) -> pd.DataFrame:
         out_rows.append({
             "Center": center,
             "Store": CENTER_NAMES.get(center, ""),
-            "Base M1": r.get("Base M1"),
-            "Base M2": r.get("Base M2"),
-            "Base M3": r.get("Base M3"),
             "Base Quarter": base_q,
-            "Current M1": r.get("Current M1"),
-            "Current M2": r.get("Current M2"),
-            "Current M3": r.get("Current M3"),
             "Current Quarter": curr_q,
             "YoY $ Variance": yoy_dollar,
             "YoY % Variance": yoy_pct,
@@ -278,33 +342,31 @@ def build_base_table(input_df: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(out_rows)
 
-def add_scenario_columns(df: pd.DataFrame, scenarios: list[float], target_month_weights: tuple[float, float, float]) -> pd.DataFrame:
+def add_scenario_columns(df: pd.DataFrame, scenarios: list[float]) -> pd.DataFrame:
     out = df.copy()
-    w1, w2, w3 = target_month_weights
 
     for scen in scenarios:
         pct = scen / 100.0
         qcol = f"Goal {scen:.1f}% Quarter"
-        m1col = f"Goal {scen:.1f}% M1"
-        m2col = f"Goal {scen:.1f}% M2"
-        m3col = f"Goal {scen:.1f}% M3"
+        status_col = f"Goal {scen:.1f}% Status"
 
         out[qcol] = out["Base Quarter"] * (1 + pct)
-        out[m1col] = out[qcol] * w1
-        out[m2col] = out[qcol] * w2
-        out[m3col] = out[qcol] * w3
+        out[status_col] = out.apply(
+            lambda r: get_status_icon(r.get("Current Quarter"), r.get(qcol)),
+            axis=1
+        )
 
     return out
 
-def add_benchmark_projection(df: pd.DataFrame, benchmark_adjustment_pct: float, target_month_weights: tuple[float, float, float]) -> pd.DataFrame:
+def add_benchmark_projection(df: pd.DataFrame, benchmark_adjustment_pct: float) -> pd.DataFrame:
     out = df.copy()
-    w1, w2, w3 = target_month_weights
 
     out["Benchmark %"] = out["YoY % Variance"] + (benchmark_adjustment_pct / 100.0)
     out["Benchmark Quarter Goal"] = out["Base Quarter"] * (1 + out["Benchmark %"])
-    out["Benchmark M1 Goal"] = out["Benchmark Quarter Goal"] * w1
-    out["Benchmark M2 Goal"] = out["Benchmark Quarter Goal"] * w2
-    out["Benchmark M3 Goal"] = out["Benchmark Quarter Goal"] * w3
+    out["Benchmark Status"] = out.apply(
+        lambda r: get_status_icon(r.get("Current Quarter"), r.get("Benchmark Quarter Goal")),
+        axis=1
+    )
     return out
 
 def build_company_rollup(df: pd.DataFrame, scenarios: list[float]) -> pd.DataFrame:
@@ -339,60 +401,36 @@ def build_company_rollup(df: pd.DataFrame, scenarios: list[float]) -> pd.DataFra
 
     return pd.DataFrame(rows)
 
-def build_profit_center_breakdown(df: pd.DataFrame, alloc: dict[str, float]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    q_rows = []
-    m_rows = []
+def build_profit_center_goal_allocation(df: pd.DataFrame, alloc: dict[str, float]) -> pd.DataFrame:
+    rows = []
 
     for _, r in df.iterrows():
         center = r["Center"]
         store = r["Store"]
         qgoal = r.get("Selected Quarter Goal")
 
-        m1 = r.get("Selected M1 Goal")
-        m2 = r.get("Selected M2 Goal")
-        m3 = r.get("Selected M3 Goal")
-
-        q_entry = {
+        entry = {
             "Center": center,
             "Store": store,
             "Profit Center Sales Goal": qgoal,
         }
-        m_entry = {
-            "Center": center,
-            "Store": store,
-            "Monthly Profit Center Sales Goal": (qgoal / 3.0 if pd.notna(qgoal) else None),
-        }
 
         for pc_name, pc_pct in alloc.items():
             pct = pc_pct / 100.0
-            q_entry[pc_name] = qgoal * pct if pd.notna(qgoal) else None
-            m_entry[pc_name] = (qgoal / 3.0) * pct if pd.notna(qgoal) else None
+            entry[pc_name] = qgoal * pct if pd.notna(qgoal) else None
 
-        for pc_name, pc_pct in alloc.items():
-            pct = pc_pct / 100.0
-            m_entry[f"{pc_name} M1"] = m1 * pct if pd.notna(m1) else None
-            m_entry[f"{pc_name} M2"] = m2 * pct if pd.notna(m2) else None
-            m_entry[f"{pc_name} M3"] = m3 * pct if pd.notna(m3) else None
+        rows.append(entry)
 
-        q_rows.append(q_entry)
-        m_rows.append(m_entry)
-
-    return pd.DataFrame(q_rows), pd.DataFrame(m_rows)
+    return pd.DataFrame(rows)
 
 def add_selected_goal_columns(df: pd.DataFrame, selected_goal_type: str) -> pd.DataFrame:
     out = df.copy()
 
     if selected_goal_type == "Benchmark":
         out["Selected Quarter Goal"] = out["Benchmark Quarter Goal"]
-        out["Selected M1 Goal"] = out["Benchmark M1 Goal"]
-        out["Selected M2 Goal"] = out["Benchmark M2 Goal"]
-        out["Selected M3 Goal"] = out["Benchmark M3 Goal"]
     else:
         scen = float(selected_goal_type)
         out["Selected Quarter Goal"] = out[f"Goal {scen:.1f}% Quarter"]
-        out["Selected M1 Goal"] = out[f"Goal {scen:.1f}% M1"]
-        out["Selected M2 Goal"] = out[f"Goal {scen:.1f}% M2"]
-        out["Selected M3 Goal"] = out[f"Goal {scen:.1f}% M3"]
 
     return out
 
@@ -431,23 +469,6 @@ comparison_input_mode = st.sidebar.radio(
     ]
 )
 
-dist_mode = st.sidebar.radio(
-    "Target Monthly Distribution",
-    options=["Equal Split", "Custom Weights"],
-    index=0
-)
-
-if dist_mode == "Equal Split":
-    target_weights = (0.3333, 0.3333, 0.3334)
-else:
-    mw1 = st.sidebar.number_input("Month 1 Weight %", min_value=0.0, max_value=100.0, value=33.3, step=0.1)
-    mw2 = st.sidebar.number_input("Month 2 Weight %", min_value=0.0, max_value=100.0, value=33.3, step=0.1)
-    mw3 = st.sidebar.number_input("Month 3 Weight %", min_value=0.0, max_value=100.0, value=33.4, step=0.1)
-    target_weights = (mw1 / 100.0, mw2 / 100.0, mw3 / 100.0)
-
-if abs(sum(target_weights) - 1.0) > 0.0001:
-    st.sidebar.warning(f"Monthly weights total {sum(target_weights):.2%}, not 100.0%.")
-
 scenarios_csv = st.sidebar.text_input("Scenario % Targets", value="4,6,8,10")
 try:
     scenario_values = [float(x.strip()) for x in scenarios_csv.split(",") if x.strip()]
@@ -463,13 +484,13 @@ benchmark_adjustment_pct = st.sidebar.number_input(
 )
 
 selected_goal_type = st.sidebar.selectbox(
-    "Selected Goal for Profit Center Breakdown",
+    "Selected Goal for Goal Allocation",
     options=["Benchmark"] + [f"{x:.1f}" for x in scenario_values],
     index=0
 )
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Profit Center Allocation %**")
+st.sidebar.markdown("**Goal Allocation %**")
 
 pc_shipping = st.sidebar.number_input("UPS Shipping %", value=DEFAULT_PC_ALLOC["UPS Shipping"], step=0.1)
 pc_packing = st.sidebar.number_input("Packing %", value=DEFAULT_PC_ALLOC["Packing"], step=0.1)
@@ -487,9 +508,9 @@ pc_alloc = {
 
 pc_total = sum(pc_alloc.values())
 if abs(pc_total - 95.0) < 0.0001:
-    st.sidebar.info("Profit center allocation currently totals 95.0%.")
+    st.sidebar.info("Goal allocation currently totals 95.0%.")
 elif abs(pc_total - 100.0) > 0.0001:
-    st.sidebar.warning(f"Profit center allocation totals {pc_total:.1f}%.")
+    st.sidebar.warning(f"Goal allocation totals {pc_total:.1f}%.")
 
 # ============================================================
 # INPUT AREA
@@ -565,6 +586,7 @@ process = st.button("Build Quarter Goal Plan", type="primary", use_container_wid
 if process:
     base_df = pd.DataFrame({"Center": CENTER_ORDER})
     current_df = pd.DataFrame({"Center": CENTER_ORDER})
+    actual_pc_comparison_df = pd.DataFrame()
 
     if comparison_input_mode == "Monthly Store Tables":
         base_parsed = parse_simple_monthly_sales(base_monthly_text)
@@ -577,30 +599,16 @@ if process:
 
         if not base_parsed.empty:
             base_df = base_df.merge(base_parsed, on="Center", how="left")
-            base_df = base_df.rename(columns={
-                "M1": "Base M1",
-                "M2": "Base M2",
-                "M3": "Base M3",
-                "Quarter Total": "Base Quarter",
-            })
+            base_df["Base Quarter"] = base_df["Quarter Total"]
+            base_df = base_df.drop(columns=[c for c in ["M1", "M2", "M3", "Quarter Total"] if c in base_df.columns])
         else:
-            base_df["Base M1"] = None
-            base_df["Base M2"] = None
-            base_df["Base M3"] = None
             base_df["Base Quarter"] = None
 
         if not current_parsed.empty:
             current_df = current_df.merge(current_parsed, on="Center", how="left")
-            current_df = current_df.rename(columns={
-                "M1": "Current M1",
-                "M2": "Current M2",
-                "M3": "Current M3",
-                "Quarter Total": "Current Quarter",
-            })
+            current_df["Current Quarter"] = current_df["Quarter Total"]
+            current_df = current_df.drop(columns=[c for c in ["M1", "M2", "M3", "Quarter Total"] if c in current_df.columns])
         else:
-            current_df["Current M1"] = None
-            current_df["Current M2"] = None
-            current_df["Current M3"] = None
             current_df["Current Quarter"] = None
 
     elif comparison_input_mode == "Quarter Totals Only":
@@ -618,23 +626,18 @@ if process:
         else:
             base_df["Base Quarter"] = None
 
-        base_df["Base M1"] = None
-        base_df["Base M2"] = None
-        base_df["Base M3"] = None
-
         if not current_parsed.empty:
             current_df = current_df.merge(current_parsed, on="Center", how="left")
             current_df = current_df.rename(columns={"Quarter Total": "Current Quarter"})
         else:
             current_df["Current Quarter"] = None
 
-        current_df["Current M1"] = None
-        current_df["Current M2"] = None
-        current_df["Current M3"] = None
-
     else:
-        # FRS quarter reports - one box per store
         base_rows = []
+        current_rows = []
+        base_pc_map = {}
+        current_pc_map = {}
+
         for center in CENTER_ORDER:
             rpt = (base_frs_inputs.get(center) or "").strip()
             if not rpt:
@@ -655,7 +658,8 @@ if process:
                 "Base Quarter": parsed.net_sales
             })
 
-        current_rows = []
+            base_pc_map[center] = extract_actual_profit_centers(parsed.categories)
+
         for center in CENTER_ORDER:
             rpt = (current_frs_inputs.get(center) or "").strip()
             if not rpt:
@@ -676,6 +680,8 @@ if process:
                 "Current Quarter": parsed.net_sales
             })
 
+            current_pc_map[center] = extract_actual_profit_centers(parsed.categories)
+
         base_parsed = pd.DataFrame(base_rows)
         current_parsed = pd.DataFrame(current_rows)
 
@@ -689,12 +695,7 @@ if process:
         else:
             current_df["Current Quarter"] = None
 
-        base_df["Base M1"] = None
-        base_df["Base M2"] = None
-        base_df["Base M3"] = None
-        current_df["Current M1"] = None
-        current_df["Current M2"] = None
-        current_df["Current M3"] = None
+        actual_pc_comparison_df = build_profit_center_comparison(base_pc_map, current_pc_map)
 
     unified = (
         pd.DataFrame({"Center": CENTER_ORDER})
@@ -707,11 +708,11 @@ if process:
         st.stop()
 
     base_table = build_base_table(unified)
-    scenario_table = add_scenario_columns(base_table, scenario_values, target_weights)
-    scenario_table = add_benchmark_projection(scenario_table, benchmark_adjustment_pct, target_weights)
+    scenario_table = add_scenario_columns(base_table, scenario_values)
+    scenario_table = add_benchmark_projection(scenario_table, benchmark_adjustment_pct)
     scenario_table = add_selected_goal_columns(scenario_table, selected_goal_type)
     company_rollup = build_company_rollup(scenario_table, scenario_values)
-    quarterly_pc_df, monthly_pc_df = build_profit_center_breakdown(scenario_table, pc_alloc)
+    quarterly_goal_alloc_df = build_profit_center_goal_allocation(scenario_table, pc_alloc)
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Benchmark Builder",
@@ -725,11 +726,10 @@ if process:
         st.subheader("Benchmark Builder")
         bench_cols = [
             "Center", "Store",
-            "Base M1", "Base M2", "Base M3", "Base Quarter",
-            "Current M1", "Current M2", "Current M3", "Current Quarter",
+            "Base Quarter",
+            "Current Quarter",
             "YoY $ Variance", "YoY % Variance",
-            "Benchmark %", "Benchmark Quarter Goal",
-            "Benchmark M1 Goal", "Benchmark M2 Goal", "Benchmark M3 Goal",
+            "Benchmark %", "Benchmark Quarter Goal", "Benchmark Status",
         ]
         bench_df = scenario_table[[c for c in bench_cols if c in scenario_table.columns]].copy()
         st.dataframe(bench_df, use_container_width=True)
@@ -742,7 +742,7 @@ if process:
                 f"{current_label} {fmt_money(r['Current Quarter'])} | "
                 f"YoY {fmt_money(r['YoY $ Variance'])} ({fmt_pct(r['YoY % Variance'])}) | "
                 f"Benchmark {fmt_pct(r['Benchmark %'])} | "
-                f"{quarter_label} Benchmark Goal {fmt_money(r['Benchmark Quarter Goal'])}"
+                f"{quarter_label} Benchmark Goal {fmt_money(r['Benchmark Quarter Goal'])} {r.get('Benchmark Status', '')}"
             )
         st.text_area("Copy / Paste Benchmark Summary", "\n".join(summary_lines), height=240)
 
@@ -752,25 +752,25 @@ if process:
         for scen in scenario_values:
             scen_cols += [
                 f"Goal {scen:.1f}% Quarter",
-                f"Goal {scen:.1f}% M1",
-                f"Goal {scen:.1f}% M2",
-                f"Goal {scen:.1f}% M3",
+                f"Goal {scen:.1f}% Status",
             ]
         scen_df = scenario_table[[c for c in scen_cols if c in scenario_table.columns]].copy()
         st.dataframe(scen_df, use_container_width=True)
 
         st.caption(
-            f"Selected goal for profit-center breakdown: "
+            f"Selected goal for goal allocation: "
             f"{'Benchmark' if selected_goal_type == 'Benchmark' else selected_goal_type + '% scenario'}"
         )
 
     with tab3:
         st.subheader("Profit Center Breakdown")
-        st.markdown("**Quarterly Profit Center Breakdown**")
-        st.dataframe(quarterly_pc_df, use_container_width=True)
 
-        st.markdown("**Monthly Profit Center Breakdown**")
-        st.dataframe(monthly_pc_df, use_container_width=True)
+        if comparison_input_mode == "FRS Quarter Reports (one box per store)" and not actual_pc_comparison_df.empty:
+            st.markdown("**Quarterly Profit Center Comparison (Actual FRS Data)**")
+            st.dataframe(actual_pc_comparison_df, use_container_width=True)
+
+        st.markdown("**Quarterly Goal Allocation**")
+        st.dataframe(quarterly_goal_alloc_df, use_container_width=True)
 
     with tab4:
         st.subheader("Company Rollup")
@@ -822,9 +822,11 @@ if process:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             scenario_table.to_excel(writer, sheet_name="Scenario Goals", index=False)
-            quarterly_pc_df.to_excel(writer, sheet_name="Quarterly PC Breakdown", index=False)
-            monthly_pc_df.to_excel(writer, sheet_name="Monthly PC Breakdown", index=False)
+            quarterly_goal_alloc_df.to_excel(writer, sheet_name="Quarterly Goal Allocation", index=False)
             company_rollup.to_excel(writer, sheet_name="Company Rollup", index=False)
+
+            if not actual_pc_comparison_df.empty:
+                actual_pc_comparison_df.to_excel(writer, sheet_name="PC YoY Comparison", index=False)
 
             am_df, gm_df, cm_df = build_bonus_reference_tables()
             am_df.to_excel(writer, sheet_name="Bonus Area Manager", index=False)
@@ -850,12 +852,12 @@ if process:
 4. The app then builds:
    - a **Benchmark** goal based on actual YoY performance plus any uplift
    - fixed **scenario goals** like {", ".join([f"{x:.1f}%" for x in scenario_values])}
-5. Choose which goal type should drive the **profit-center breakdown**.
-6. Review:
-   - Benchmark Builder
-   - Scenario Goals
-   - Profit Center Breakdown
-   - Company Rollup
-   - Bonus Reference
+5. Choose which goal type should drive the **quarterly goal allocation**.
+6. If you use **FRS Quarter Reports**, the app also builds an **actual profit-center YoY comparison**:
+   - UPS Shipping = Shipping Charges (UPS)
+   - Packing = Retail Shipping Supplies + Packaging Materials + Packaging Service Fee + Office Supplies
+   - Mailbox = Mailbox Service
+   - Notary = Notary
+   - Print = Printing
 """
         )

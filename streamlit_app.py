@@ -114,6 +114,10 @@ class ParsedFRS:
 
 def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
     """
+    Parses FRS Worker Sales by Product Category reports in either:
+    1. multiline pasted format
+    2. single-line exported format
+
     Pulls:
     - Center
     - Totals income
@@ -121,36 +125,89 @@ def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
     - Net Sales = Totals - PSP
     - Product category income lines
     """
-    text = normalize_text(text)
+    raw_text = text or ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
 
     center = None
-    m = re.search(r"Center:\s*(\d{3,5})", text, flags=re.IGNORECASE)
-    if m:
-        center = m.group(1)
+    total_sales = None
+    categories = {}
+
+    # ----------------------------
+    # Center
+    # ----------------------------
+    for i, line in enumerate(lines):
+        if line.lower() == "center:" and i + 1 < len(lines):
+            if re.fullmatch(r"\d{3,5}", lines[i + 1]):
+                center = lines[i + 1]
+                break
 
     if not center:
-        m = re.search(r"Center:\s*\n\s*(\d{3,5})", text, flags=re.IGNORECASE)
+        m = re.search(r"Center:\s*(\d{3,5})", text, flags=re.IGNORECASE)
         if m:
             center = m.group(1)
 
-    total_sales = None
-    m = re.search(
-        r"^Totals\s+\d+\s+\d+\s+\$([\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}\s+\$[\d,]+\.\d{2}\s*$",
-        text,
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
-    if m:
-        total_sales = money_to_float(m.group(1))
+    # ----------------------------
+    # Pass 1: multiline format
+    # Example:
+    # + Color Copies
+    # 63
+    # 464
+    # $434.17
+    # $6.89
+    # $0.94
+    # ----------------------------
+    i = 0
+    while i < len(lines):
+        line = lines[i]
 
-    categories = {}
-    category_matches = re.finditer(
-        r"^[\+\-]\s*(.*?)\s+\d+\s+\d+\s+\$([\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}\s+\$[\d,]+\.\d{2}\s*$",
-        text,
-        flags=re.IGNORECASE | re.MULTILINE,
-    )
-    for match in category_matches:
-        cat_name = re.sub(r"\s+", " ", match.group(1)).strip()
-        categories[cat_name] = money_to_float(match.group(2))
+        # category block
+        if (line.startswith("+") or line.startswith("-")) and i + 3 < len(lines):
+            cat_name = re.sub(r"^[\+\-]\s*", "", line).strip()
+
+            # expected layout:
+            # line+1 = customer count
+            # line+2 = net item count
+            # line+3 = discounted income
+            income_candidate = lines[i + 3] if i + 3 < len(lines) else None
+
+            if income_candidate and re.fullmatch(r"\$[\d,]+\.\d{2}", income_candidate):
+                categories[cat_name] = money_to_float(income_candidate)
+                i += 6
+                continue
+
+        # totals block
+        if line.lower() == "totals" and i + 3 < len(lines):
+            income_candidate = lines[i + 3]
+            if re.fullmatch(r"\$[\d,]+\.\d{2}", income_candidate):
+                total_sales = money_to_float(income_candidate)
+                i += 6
+                continue
+
+        i += 1
+
+    # ----------------------------
+    # Pass 2: fallback for single-line export format
+    # ----------------------------
+    if not categories:
+        category_matches = re.finditer(
+            r"^[\+\-]\s*(.*?)\s+\d+\s+\d+\s+\$([\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}\s+\$[\d,]+\.\d{2}\s*$",
+            text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        for match in category_matches:
+            cat_name = re.sub(r"\s+", " ", match.group(1)).strip()
+            categories[cat_name] = money_to_float(match.group(2))
+
+    if total_sales is None:
+        m = re.search(
+            r"^Totals\s+\d+\s+\d+\s+\$([\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}\s+\$[\d,]+\.\d{2}\s*$",
+            text,
+            flags=re.IGNORECASE | re.MULTILINE,
+        )
+        if m:
+            total_sales = money_to_float(m.group(1))
 
     psp_sales = categories.get("Public Service Payments", 0.0)
 
@@ -164,7 +221,8 @@ def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
         psp_sales=psp_sales,
         net_sales=net_sales,
         categories=categories,
-        raw_text=text,
+        raw_text=raw_text,
+    )
     )
 
 def parse_simple_monthly_sales(text: str) -> pd.DataFrame:

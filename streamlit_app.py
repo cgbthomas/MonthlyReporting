@@ -33,7 +33,7 @@ CENTER_NAMES = {
 CENTER_ORDER = ["1504", "5027", "5052", "5255", "5778", "6176", "6769", "7261"]
 
 DEFAULT_SCENARIOS = [4.0, 6.0, 8.0, 10.0]
-DEFAULT_FUTURE_SCENARIOS = [2.0, 4.0, 6.0, 8.0]
+DEFAULT_FUTURE_SCENARIOS = [2.0, 4.0, 6.0, 8.0, 10.0]
 
 DEFAULT_PC_ALLOC = {
     "UPS Shipping": 25.0,
@@ -74,19 +74,24 @@ def normalize_text(text: str) -> str:
     text = re.sub(r"[ ]{2,}", " ", text)
     return text.strip()
 
+
 def money_to_float(s: str) -> float:
     return float(str(s).replace("$", "").replace(",", "").strip())
+
 
 def fmt_money(x):
     return "—" if x is None or pd.isna(x) else f"${x:,.2f}"
 
+
 def fmt_pct(x):
     return "—" if x is None or pd.isna(x) else f"{x:.1%}"
+
 
 def safe_div(a, b):
     if a is None or b is None or pd.isna(a) or pd.isna(b) or b == 0:
         return None
     return a / b
+
 
 def get_status_icon(actual: Optional[float], goal: Optional[float]) -> str:
     if actual is None or goal is None or pd.isna(actual) or pd.isna(goal):
@@ -98,10 +103,19 @@ def get_status_icon(actual: Optional[float], goal: Optional[float]) -> str:
         return "🟡"
     return "🔴"
 
+
 def get_category_amount(categories: dict[str, float], name: str) -> float:
     return float(categories.get(name, 0.0) or 0.0)
 
-def preserve_month_mix_or_weights(df: pd.DataFrame, qcol: str, m1col: str, m2col: str, m3col: str, weights: tuple[float, float, float]) -> pd.DataFrame:
+
+def preserve_month_mix_or_weights(
+    df: pd.DataFrame,
+    qcol: str,
+    m1col: str,
+    m2col: str,
+    m3col: str,
+    weights: tuple[float, float, float],
+) -> pd.DataFrame:
     out = df.copy()
     w1, w2, w3 = weights
 
@@ -115,9 +129,15 @@ def preserve_month_mix_or_weights(df: pd.DataFrame, qcol: str, m1col: str, m2col
         out[m2col] = None
         out[m3col] = None
 
-        out.loc[use_mix, m1col] = out.loc[use_mix, qcol] * (out.loc[use_mix, "Base M1"] / month_total[use_mix])
-        out.loc[use_mix, m2col] = out.loc[use_mix, qcol] * (out.loc[use_mix, "Base M2"] / month_total[use_mix])
-        out.loc[use_mix, m3col] = out.loc[use_mix, qcol] * (out.loc[use_mix, "Base M3"] / month_total[use_mix])
+        out.loc[use_mix, m1col] = out.loc[use_mix, qcol] * (
+            out.loc[use_mix, "Base M1"] / month_total[use_mix]
+        )
+        out.loc[use_mix, m2col] = out.loc[use_mix, qcol] * (
+            out.loc[use_mix, "Base M2"] / month_total[use_mix]
+        )
+        out.loc[use_mix, m3col] = out.loc[use_mix, qcol] * (
+            out.loc[use_mix, "Base M3"] / month_total[use_mix]
+        )
 
         out.loc[~use_mix, m1col] = out.loc[~use_mix, qcol] * w1
         out.loc[~use_mix, m2col] = out.loc[~use_mix, qcol] * w2
@@ -128,6 +148,13 @@ def preserve_month_mix_or_weights(df: pd.DataFrame, qcol: str, m1col: str, m2col
         out[m3col] = out[qcol] * w3
 
     return out
+
+
+def clean_currency_display(v):
+    if v is None or pd.isna(v):
+        return ""
+    return f"${float(v):,.2f}"
+
 
 # ============================================================
 # PARSERS
@@ -141,18 +168,12 @@ class ParsedFRS:
     categories: dict[str, float]
     raw_text: str
 
+
 def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
     """
     Parses FRS Worker Sales by Product Category reports in either:
     1. multiline pasted format
     2. single-line exported format
-
-    Pulls:
-    - Center
-    - Totals income
-    - Public Service Payments income
-    - Net Sales = Totals - PSP
-    - Product category income lines
     """
     raw_text = text or ""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -163,7 +184,6 @@ def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
     total_sales = None
     categories = {}
 
-    # Center
     for i, line in enumerate(lines):
         if line.lower() == "center:" and i + 1 < len(lines):
             if re.fullmatch(r"\d{3,5}", lines[i + 1]):
@@ -175,7 +195,6 @@ def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
         if m:
             center = m.group(1)
 
-    # Pass 1: multiline format
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -198,7 +217,6 @@ def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
 
         i += 1
 
-    # Pass 2: single-line export fallback
     if not categories:
         category_matches = re.finditer(
             r"^[\+\-]\s*(.*?)\s+\d+\s+\d+\s+\$([\d,]+\.\d{2})\s+\$[\d,]+\.\d{2}\s+\$[\d,]+\.\d{2}\s*$",
@@ -232,6 +250,7 @@ def parse_frs_worker_sales_report(text: str) -> ParsedFRS:
         categories=categories,
         raw_text=raw_text,
     )
+
 
 def parse_simple_monthly_sales(text: str) -> pd.DataFrame:
     """
@@ -282,6 +301,7 @@ def parse_simple_monthly_sales(text: str) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
+
 def parse_simple_quarter_sales(text: str) -> pd.DataFrame:
     """
     Accepts:
@@ -306,6 +326,7 @@ def parse_simple_quarter_sales(text: str) -> pd.DataFrame:
                 pass
 
     return pd.DataFrame(rows)
+
 
 # ============================================================
 # ACTUAL FRS PROFIT CENTER LOGIC
@@ -338,6 +359,7 @@ def extract_actual_profit_centers(categories: dict[str, float]) -> dict[str, flo
         "Print": printing,
     }
 
+
 def build_profit_center_comparison(base_pc_map: dict, current_pc_map: dict) -> pd.DataFrame:
     rows = []
 
@@ -363,6 +385,7 @@ def build_profit_center_comparison(base_pc_map: dict, current_pc_map: dict) -> p
             })
 
     return pd.DataFrame(rows)
+
 
 # ============================================================
 # CORE BUILDERS
@@ -404,6 +427,7 @@ def build_base_table(input_df: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(out_rows)
 
+
 def add_scenario_columns(df: pd.DataFrame, scenarios: list[float]) -> pd.DataFrame:
     out = df.copy()
 
@@ -420,6 +444,7 @@ def add_scenario_columns(df: pd.DataFrame, scenarios: list[float]) -> pd.DataFra
 
     return out
 
+
 def add_benchmark_projection(df: pd.DataFrame, benchmark_adjustment_pct: float) -> pd.DataFrame:
     out = df.copy()
 
@@ -431,6 +456,7 @@ def add_benchmark_projection(df: pd.DataFrame, benchmark_adjustment_pct: float) 
     )
     return out
 
+
 def add_selected_goal_columns(df: pd.DataFrame, selected_goal_type: str) -> pd.DataFrame:
     out = df.copy()
 
@@ -441,6 +467,7 @@ def add_selected_goal_columns(df: pd.DataFrame, selected_goal_type: str) -> pd.D
         out["Selected Quarter Goal"] = out[f"Goal {scen:.1f}% Quarter"]
 
     return out
+
 
 def build_profit_center_goal_allocation(df: pd.DataFrame, alloc: dict[str, float]) -> pd.DataFrame:
     rows = []
@@ -463,6 +490,7 @@ def build_profit_center_goal_allocation(df: pd.DataFrame, alloc: dict[str, float
         rows.append(entry)
 
     return pd.DataFrame(rows)
+
 
 def build_company_rollup(df: pd.DataFrame, scenarios: list[float]) -> pd.DataFrame:
     rows = []
@@ -496,6 +524,7 @@ def build_company_rollup(df: pd.DataFrame, scenarios: list[float]) -> pd.DataFra
 
     return pd.DataFrame(rows)
 
+
 def build_future_goal_projection(df: pd.DataFrame, scenarios: list[float], month_weights: tuple[float, float, float]) -> pd.DataFrame:
     out = df.copy()
 
@@ -510,6 +539,7 @@ def build_future_goal_projection(df: pd.DataFrame, scenarios: list[float], month
         out = preserve_month_mix_or_weights(out, qcol, m1col, m2col, m3col, month_weights)
 
     return out
+
 
 def build_bonus_reference_tables():
     def to_df(d: dict[float, dict[str, float]], label: str):
@@ -527,6 +557,7 @@ def build_bonus_reference_tables():
         to_df(GENERAL_MANAGER_BONUS, "General Manager"),
         to_df(CENTER_MANAGER_BONUS, "Center Manager"),
     )
+
 
 # ============================================================
 # SIDEBAR / SETTINGS
@@ -570,7 +601,7 @@ try:
 except Exception:
     scenario_values = DEFAULT_SCENARIOS
 
-future_scenarios_csv = st.sidebar.text_input("Future Planner % Targets", value="2,4,6,8")
+future_scenarios_csv = st.sidebar.text_input("Future Planner % Targets", value="2,4,6,8,10")
 try:
     future_scenario_values = [float(x.strip()) for x in future_scenarios_csv.split(",") if x.strip()]
     future_scenario_values = sorted(set(future_scenario_values))
@@ -683,18 +714,80 @@ st.subheader("2) Future Goal Planner Input")
 
 future_input_mode = st.radio(
     "Future Planner Input Style",
-    options=["Monthly Store Tables", "Quarter Totals Only"],
+    options=["Store Entry Grid", "Quarter Totals Only"],
     horizontal=True,
     key="future_input_mode"
 )
 
-if future_input_mode == "Monthly Store Tables":
-    future_monthly_text = st.text_area(
-        "Future Planner Base Monthly Sales by Store",
-        height=220,
-        placeholder="1504,78742,78122,79753\n5027,75411,81194,76831",
-        key="future_monthly_text"
+# Store Entry Grid
+future_grid_rows = []
+if future_input_mode == "Store Entry Grid":
+    st.caption(
+        "Enter last year's monthly sales by store. The quarter total will calculate automatically, "
+        "and the app will project 2%, 4%, 6%, 8%, and 10% goals by month and by quarter."
     )
+
+    grid_header = st.columns([1.1, 1.8, 1.3, 1.3, 1.3, 1.5])
+    with grid_header[0]:
+        st.markdown("**Center**")
+    with grid_header[1]:
+        st.markdown("**Store**")
+    with grid_header[2]:
+        st.markdown("**M1**")
+    with grid_header[3]:
+        st.markdown("**M2**")
+    with grid_header[4]:
+        st.markdown("**M3**")
+    with grid_header[5]:
+        st.markdown("**Quarter Total**")
+
+    for center in CENTER_ORDER:
+        row_cols = st.columns([1.1, 1.8, 1.3, 1.3, 1.3, 1.5])
+        store_name = CENTER_NAMES.get(center, "")
+
+        m1 = row_cols[2].number_input(
+            label=f"{center} M1",
+            min_value=0.0,
+            value=0.0,
+            step=100.0,
+            key=f"future_grid_{center}_m1",
+            label_visibility="collapsed",
+        )
+        m2 = row_cols[3].number_input(
+            label=f"{center} M2",
+            min_value=0.0,
+            value=0.0,
+            step=100.0,
+            key=f"future_grid_{center}_m2",
+            label_visibility="collapsed",
+        )
+        m3 = row_cols[4].number_input(
+            label=f"{center} M3",
+            min_value=0.0,
+            value=0.0,
+            step=100.0,
+            key=f"future_grid_{center}_m3",
+            label_visibility="collapsed",
+        )
+
+        q_total = m1 + m2 + m3
+
+        with row_cols[0]:
+            st.write(center)
+        with row_cols[1]:
+            st.write(store_name)
+        with row_cols[5]:
+            st.write(f"**{fmt_money(q_total)}**")
+
+        future_grid_rows.append({
+            "Center": center,
+            "Store": store_name,
+            "Base M1": m1,
+            "Base M2": m2,
+            "Base M3": m3,
+            "Base Quarter": q_total,
+        })
+
 else:
     future_quarter_text = st.text_area(
         "Future Planner Base Quarter Totals by Store",
@@ -753,7 +846,7 @@ if process:
             diagnostics.append(f"{current_label} quarter table could not be parsed.")
 
         if not base_parsed.empty:
-            base_df = base_df.merge(base_parsed, on="Center", how="left")
+            base_df = base_df.merge(base_parsed.rename(columns={"Base Quarter": "Base Quarter"}), on="Center", how="left")
         else:
             base_df["Base Quarter"] = None
 
@@ -855,25 +948,18 @@ if process:
     # ----------------------------
     # Future Goal Planner
     # ----------------------------
-    future_base_df = pd.DataFrame({"Center": CENTER_ORDER})
-
-    if future_input_mode == "Monthly Store Tables":
-        future_parsed = parse_simple_monthly_sales(future_monthly_text)
-        if future_parsed.empty:
-            diagnostics.append("Future planner monthly table could not be parsed.")
-            future_base_df["Base Quarter"] = None
-            future_base_df["Base M1"] = None
-            future_base_df["Base M2"] = None
-            future_base_df["Base M3"] = None
-        else:
-            future_base_df = future_base_df.merge(future_parsed, on="Center", how="left")
+    if future_input_mode == "Store Entry Grid":
+        future_base_df = pd.DataFrame(future_grid_rows)
     else:
+        future_base_df = pd.DataFrame({"Center": CENTER_ORDER})
         future_parsed = parse_simple_quarter_sales(future_quarter_text)
         if future_parsed.empty:
             diagnostics.append("Future planner quarter table could not be parsed.")
             future_base_df["Base Quarter"] = None
         else:
             future_base_df = future_base_df.merge(future_parsed, on="Center", how="left")
+
+        future_base_df["Store"] = future_base_df["Center"].map(CENTER_NAMES)
         future_base_df["Base M1"] = None
         future_base_df["Base M2"] = None
         future_base_df["Base M3"] = None
@@ -987,25 +1073,33 @@ if process:
 
     with tab6:
         st.subheader("Future Goal Planner")
-        st.caption("Use last year's quarter data to project future quarter goals at 2%, 4%, 6%, and 8% (or your selected targets).")
+        st.caption(
+            "Uses last year's same-quarter monthly or quarter totals and projects future goals by month and quarter."
+        )
+
+        base_cols = ["Center", "Store", "Base M1", "Base M2", "Base M3", "Base Quarter"]
+        base_view = future_goal_df[[c for c in base_cols if c in future_goal_df.columns]].copy()
+        st.markdown("**Base Quarter Input Summary**")
+        st.dataframe(base_view, use_container_width=True)
 
         future_cols = ["Center", "Store", "Base Quarter"]
-        has_months = future_input_mode == "Monthly Store Tables"
-        if has_months:
+        if future_input_mode == "Store Entry Grid":
             future_cols += ["Base M1", "Base M2", "Base M3"]
 
         for scen in future_scenario_values:
             future_cols += [f"Goal {scen:.1f}% Quarter"]
-            if has_months:
+            if future_input_mode == "Store Entry Grid":
                 future_cols += [f"Goal {scen:.1f}% M1", f"Goal {scen:.1f}% M2", f"Goal {scen:.1f}% M3"]
 
+        st.markdown("**Future Goal Projection**")
         st.dataframe(future_goal_df[[c for c in future_cols if c in future_goal_df.columns]], use_container_width=True)
 
         summary_lines = []
         for _, r in future_goal_df.iterrows():
             pieces = [f"{r['Center']} {r['Store']}: Base {fmt_money(r['Base Quarter'])}"]
             for scen in future_scenario_values:
-                pieces.append(f"{scen:.1f}% {fmt_money(r.get(f'Goal {scen:.1f}% Quarter'))}")
+                q_val = r.get(f"Goal {scen:.1f}% Quarter")
+                pieces.append(f"{scen:.1f}% {fmt_money(q_val)}")
             summary_lines.append(" | ".join(pieces))
         st.text_area("Copy / Paste Future Goal Summary", "\n".join(summary_lines), height=240)
 
@@ -1064,11 +1158,11 @@ If you use **FRS Quarter Reports**, the app also builds an **actual profit-cente
 - Print = Printing
 
 ### Future Goal Planner
-Use last year's quarter data to project future goals.
-- Supports **Monthly Store Tables**
-- Supports **Quarter Totals Only**
+Use last year's same-quarter data to project future goals.
+- **Store Entry Grid** lets you enter M1, M2, and M3 for each of the 8 stores
+- Quarter total calculates automatically
 - Projects **{", ".join([f"{x:.1f}%" for x in future_scenario_values])}**
-- If monthly data exists, the app preserves the original month mix
-- Otherwise, it uses the selected monthly distribution
+- If monthly data exists, projected monthly goals preserve the original month mix
+- If quarter totals only are used, projected monthly goals use the selected monthly distribution
 """
         )

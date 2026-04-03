@@ -876,7 +876,10 @@ if process:
     # -----------------------------------
     # Guidance
     # -----------------------------------
-        with st.expander("How to use this planner", expanded=False):
+    # -----------------------------------
+    # Guidance
+    # -----------------------------------
+    with st.expander("How to use this planner", expanded=False):
         st.markdown(
             f"""
 1. Enter your baseline sales for **{base_label}** by store.
